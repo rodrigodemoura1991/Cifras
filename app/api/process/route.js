@@ -10,23 +10,47 @@ function isCifraClubUrl(value) {
 }
 
 function htmlToStructuredText(html) {
-  // Preserve the original musical line boundaries. Flattening all whitespace
-  // was causing the model to invent line breaks based on screen width.
   return html
-    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')
-    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')
-    .replace(/<br\\s*\\/?>(?=.)/gi, '\\n')
-    .replace(/<\\/(p|div|li|tr|section|article|h[1-6])\\s*>/gi, '\\n')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<br\s*\/?>(?=.)/gi, '\n')
+    .replace(/<\/(p|div|li|tr|section|article|h[1-6])\s*>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')
     .replace(/&quot;/gi, '"')
     .replace(/&#39;/gi, "'")
-    .replace(/\\r/g, '')
-    .split('\\n')
-    .map(line => line.replace(/\\s+/g, ' ').trim())
+    .replace(/\r/g, '')
+    .split('\n')
+    .map(line => line.replace(/\s+/g, ' ').trim())
     .filter(Boolean)
-    .join('\\n');
+    .join('\n');
+}
+
+function normalizeBlocks(data) {
+  if (!Array.isArray(data?.blocks)) return data;
+  return {
+    ...data,
+    blocks: data.blocks.map((block) => {
+      if (!Array.isArray(block.lines) || !block.lines.length) return block;
+
+      // A block is a musical unit: every chord line stays on its own row,
+      // and the short lyric/anchor is shown only once, underneath the group.
+      const lines = block.lines
+        .map((line) => ({
+          chords: typeof line?.chords === 'string' ? line.chords.trim() : '',
+          lyric: typeof line?.lyric === 'string' ? line.lyric.trim() : ''
+        }))
+        .filter((line) => line.chords || line.lyric);
+
+      const anchor = [...lines].reverse().find((line) => line.lyric)?.lyric || '';
+      return {
+        ...block,
+        lines: lines.map((line) => ({ chords: line.chords, lyric: '' })),
+        anchor
+      };
+    })
+  };
 }
 
 export async function POST(request) {
@@ -62,28 +86,28 @@ REGRA PRINCIPAL — PRESERVE A ESTRUTURA ORIGINAL:
 - Não crie novas linhas apenas porque uma linha ficou comprida.
 - Mantenha os acordes exatamente na ordem em que aparecem.
 
-FORMATO DE CADA PARTE:
+FORMATO OBRIGATÓRIO DE CADA PARTE:
 - lines é uma lista na ordem musical.
 - Cada item possui chords (string) e lyric (string).
-- Normalmente, uma linha de acordes corresponde a uma linha musical.
-- Quando a letra/frase original ocupa DUAS OU MAIS linhas de acordes, mantenha TODAS as linhas de acordes separadas e coloque a letra/âncora dessa frase SOMENTE NA ÚLTIMA linha de acordes do grupo.
-- Assim, um trecho como:
+- Se uma parte tiver duas ou mais linhas de acordes para a mesma frase/trecho, mantenha TODAS as linhas de acordes separadas.
+- A frase/âncora deve aparecer SOMENTE UMA VEZ, abaixo de TODAS as linhas de acordes daquele trecho, e preferencialmente no último item.
+- Exemplo obrigatório:
   C F Em Am Dm Em F
   C F Em Am Dm Em F
   Mesmo estando em guerra...
-  deve ser representado como duas linhas de chords, com lyric vazio na primeira e lyric="Mesmo estando em guerra..." na segunda.
-- O resultado visual será, portanto: todas as linhas de acordes do grupo primeiro e a frase uma única vez abaixo delas.
+  deve virar lines=[{chords:"C F Em Am Dm Em F",lyric:""},{chords:"C F Em Am Dm Em F",lyric:"Mesmo estando em guerra..."}].
+- Nunca coloque a letra ao lado ou entre as linhas de acordes do mesmo trecho.
 - lyric deve ser apenas a frase inicial/âncora curta, sem reproduzir a letra inteira.
 - Preserve as palavras iniciais que identificam o trecho.
 - Não invente acordes. Não altere acordes. Não altere a ordem.
 
 Se a página original já separar claramente uma frase em mais de uma linha, preserve exatamente essa separação.`
         },
-        { role: 'user', content: `URL: ${url}\\nConteúdo estruturado da página original (quebras de linha preservadas):\\n${clipped}` }
+        { role: 'user', content: `URL: ${url}\nConteúdo estruturado da página original (quebras de linha preservadas):\n${clipped}` }
       ]
     });
 
-    const data = JSON.parse(completion.choices[0].message.content);
+    const data = normalizeBlocks(JSON.parse(completion.choices[0].message.content));
     return Response.json(data);
   } catch (error) {
     return Response.json({ error: error?.message || 'Erro ao processar a cifra.' }, { status: 500 });
