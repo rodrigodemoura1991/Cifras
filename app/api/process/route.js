@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import pdfParse from 'pdf-parse';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const API_FALLBACK = 'https://cifraclub-api.vercel.app/api/cifra';
@@ -95,7 +96,6 @@ function transposeChordToken(token, semitones, preferFlats) {
 function transposeChordLine(line, semitones, preferFlats) {
   return String(line || '').split(/(\s+)/).map(token => {
     if (!/^([A-Ga-g])([#b]?)(.*)$/.test(token)) return token;
-    // Only transpose tokens that look like chord symbols; plain words are left alone.
     const chordLike = /^([A-Ga-g])([#b]?)(?:(?:maj|min|m|M|dim|aug|sus|add)?(?:2|4|5|6|7|9|11|13)?(?:b5|#5)?)(?:\/[A-Ga-g][#b]?)?$/.test(token);
     return chordLike ? transposeChordToken(token, semitones, preferFlats) : token;
   }).join('');
@@ -147,14 +147,55 @@ async function fetchCifraContent(url) {
   return { text: htmlToStructuredText(html).slice(0, 60000), source: 'cifraclub-html' };
 }
 
+async function readUploadedFile(file) {
+  const name = (file.name || 'arquivo').toLowerCase();
+  const type = (file.type || '').toLowerCase();
+  const bytes = Buffer.from(await file.arrayBuffer());
+  if (bytes.length > 10 * 1024 * 1024) throw new Error('O arquivo deve ter no máximo 10 MB.');
+
+  if (type === 'application/pdf' || name.endsWith('.pdf')) {
+    const parsed = await pdfParse(bytes);
+    return { text: parsed.text.slice(0, 60000), title: file.name.replace(/\.pdf$/i, ''), artist: '', source: 'uploaded-pdf' };
+  }
+
+  if (type.includes('html') || /\.(html?|htm)$/i.test(name)) {
+    return { text: htmlToStructuredText(bytes.toString('utf8')).slice(0, 60000), title: file.name.replace(/\.(html?|htm)$/i, ''), artist: '', source: 'uploaded-html' };
+  }
+
+  if (type.startsWith('text/') || /\.(txt|md|csv)$/i.test(name)) {
+    return { text: bytes.toString('utf8').slice(0, 60000), title: file.name.replace(/\.(txt|md|csv)$/i, ''), artist: '', source: 'uploaded-text' };
+  }
+
+  throw new Error('Formato não suportado. Envie PDF, TXT ou HTML.');
+}
+
 export async function POST(request) {
   try {
-    const { url, targetKey } = await request.json();
-    if (!isCifraClubUrl(url)) return Response.json({ error: 'Cole um link válido do Cifra Club.' }, { status: 400 });
     if (!process.env.OPENAI_API_KEY) return Response.json({ error: 'OPENAI_API_KEY ainda não foi configurada na Vercel.' }, { status: 500 });
 
-    const content = await fetchCifraContent(url);
-    if (!content.text || content.text.length < 20) throw new Error('Não consegui encontrar o conteúdo da cifra nessa página.');
+    const contentType = request.headers.get('content-type') || '';
+    let url = '';
+    let targetKey = '';
+    let content;
+
+    if (contentType.includes('multipart/form-data')) {
+      const form = await request.formData();
+      url = String(form.get('url') || '').trim();
+      targetKey = String(form.get('targetKey') || '').trim();
+      const file = form.get('file');
+      if (file && typeof file !== 'string') content = await readUploadedFile(file);
+    } else {
+      const body = await request.json();
+      url = String(body.url || '').trim();
+      targetKey = String(body.targetKey || '').trim();
+    }
+
+    if (!content) {
+      if (!isCifraClubUrl(url)) return Response.json({ error: 'Cole um link válido do Cifra Club ou envie um arquivo.' }, { status: 400 });
+      content = await fetchCifraContent(url);
+    }
+
+    if (!content.text || content.text.trim().length < 20) throw new Error('Não consegui encontrar conteúdo suficiente para reconhecer a cifra.');
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
@@ -164,17 +205,17 @@ export async function POST(request) {
           role: 'system',
           content: `Organize a cifra para visualização e PDF. Retorne JSON válido com title, artist, key e blocks.
 
-O CONTEÚDO RECEBIDO PODE SER UMA LISTA DE LINHAS DA CIFRA. NÃO descarte linhas de acordes só porque estão separadas das letras. Preserve todos os acordes encontrados.
+O CONTEÚDO RECEBIDO PODE VIR DE PDF, TXT, HTML OU Cifra Club. Preserve a estrutura musical e NÃO descarte linhas de acordes só porque estão separadas das letras.
 
-IDENTIFICAÇÃO DO TOM: encontre o tom original exibido na página. Se não houver informação confiável, deduza somente quando houver evidência musical clara nos acordes. Nunca use números da URL como tom.
+IDENTIFICAÇÃO DO TOM: encontre o tom original informado no material. Se não houver informação confiável, deduza somente quando houver evidência musical clara nos acordes. Nunca use números da URL ou do nome do arquivo como tom.
 
 Cada block é uma parte natural (Intro, Primeira Parte, Pré-Refrão, Refrão, Ponte, Solo etc.). Cada block deve ter selected=true e lines. Preserve a ordem e as quebras musicais originais. Uma linha de acordes deve continuar sendo uma linha de acordes. Use somente a frase inicial curta de cada trecho como lyric/anchor; não invente letras.
 
-IMPORTANTE: o usuário quer editar os acordes depois. Portanto, mantenha os acordes exatamente reconhecíveis, por exemplo B, C#m, G#m7, E, F#, B4, B/D#, etc. Não transforme acordes em descrições.`
+IMPORTANTE: mantenha os acordes exatamente reconhecíveis para edição posterior, por exemplo B, C#m, G#m7, E, F#, B4, B/D#, etc. Não transforme acordes em descrições. Se houver várias linhas de acordes em um trecho, mantenha todas.`
         },
         {
           role: 'user',
-          content: `URL: ${url}\nTítulo detectado: ${content.title || ''}\nArtista detectado: ${content.artist || ''}\nConteúdo da cifra:\n${content.text.slice(0, 60000)}`
+          content: `Fonte: ${content.source || ''}\nTítulo detectado: ${content.title || ''}\nArtista detectado: ${content.artist || ''}\nConteúdo da cifra:\n${content.text.slice(0, 60000)}`
         }
       ]
     });
@@ -185,7 +226,7 @@ IMPORTANTE: o usuário quer editar os acordes depois. Portanto, mantenha os acor
     const originalKey = normalizeKey(data.key);
     data.originalKey = originalKey || data.key || '';
 
-    if (!data.blocks.length) throw new Error('A cifra foi acessada, mas os acordes não foram reconhecidos. Tente novamente com o link da cifra principal, não o link de letra.');
+    if (!data.blocks.length) throw new Error('A cifra foi lida, mas os acordes não foram reconhecidos. Confira se o arquivo contém a cifra e tente novamente.');
 
     const desired = normalizeKey(typeof targetKey === 'string' ? targetKey : '');
     if (desired) data = transposeBlocks(data, originalKey || data.key, desired);
