@@ -33,21 +33,16 @@ function normalizeBlocks(data) {
     ...data,
     blocks: data.blocks.map((block) => {
       if (!Array.isArray(block.lines) || !block.lines.length) return block;
-
-      // A block is a musical unit: every chord line stays on its own row,
-      // and the short lyric/anchor is shown only once, underneath the group.
       const lines = block.lines
         .map((line) => ({
           chords: typeof line?.chords === 'string' ? line.chords.trim() : '',
           lyric: typeof line?.lyric === 'string' ? line.lyric.trim() : ''
         }))
         .filter((line) => line.chords || line.lyric);
-
-      const anchor = [...lines].reverse().find((line) => line.lyric)?.lyric || '';
       return {
         ...block,
-        lines: lines.map((line) => ({ chords: line.chords, lyric: '' })),
-        anchor
+        lines,
+        anchor: [...lines].find((line) => line.lyric)?.lyric || block.anchor || ''
       };
     })
   };
@@ -86,19 +81,20 @@ REGRA PRINCIPAL — PRESERVE A ESTRUTURA ORIGINAL:
 - Não crie novas linhas apenas porque uma linha ficou comprida.
 - Mantenha os acordes exatamente na ordem em que aparecem.
 
-FORMATO OBRIGATÓRIO DE CADA PARTE:
+FORMATO OBRIGATÓRIO:
 - lines é uma lista na ordem musical.
 - Cada item possui chords (string) e lyric (string).
-- Se uma parte tiver duas ou mais linhas de acordes para a mesma frase/trecho, mantenha TODAS as linhas de acordes separadas.
-- A frase/âncora deve aparecer SOMENTE UMA VEZ, abaixo de TODAS as linhas de acordes daquele trecho, e preferencialmente no último item.
+- Preserve TODAS as linhas de acordes e TODAS as frases iniciais/âncoras encontradas no trecho.
+- Quando houver várias linhas de acordes correspondentes a um trecho, mantenha cada uma separada.
+- A apresentação final colocará TODAS as linhas de acordes primeiro e TODAS as frases/âncoras depois, sem misturá-las.
 - Exemplo obrigatório:
   C F Em Am Dm Em F
   C F Em Am Dm Em F
   Mesmo estando em guerra...
   deve virar lines=[{chords:"C F Em Am Dm Em F",lyric:""},{chords:"C F Em Am Dm Em F",lyric:"Mesmo estando em guerra..."}].
 - Nunca coloque a letra ao lado ou entre as linhas de acordes do mesmo trecho.
-- lyric deve ser apenas a frase inicial/âncora curta, sem reproduzir a letra inteira.
-- Preserve as palavras iniciais que identificam o trecho.
+- lyric deve ser a frase inicial/âncora curta correspondente à linha musical, sem reproduzir a letra inteira.
+- NÃO descarte a primeira frase do trecho. Preserve especialmente a primeira frase que identifica o começo da música ou da parte.
 - Não invente acordes. Não altere acordes. Não altere a ordem.
 
 Se a página original já separar claramente uma frase em mais de uma linha, preserve exatamente essa separação.`
