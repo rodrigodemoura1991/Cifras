@@ -53,21 +53,32 @@ async function readUploadedFile(file){
   throw new Error('Formato não suportado. Envie PDF, TXT ou HTML.');
 }
 
-function isChordToken(token){
-  return /^([A-Ga-g])([#b]?)(?:maj|min|m|dim|aug|sus|add)?(?:2|4|5|6|7|9|11|13)?(?:b5|#5)?(?:\/[A-Ga-g][#b]?)?$/.test(token);
+const CHORD_TOKEN = /[A-Ga-g](?:#|b)?(?:maj|min|m|dim|aug|sus|add)?(?:2|4|5|6|7|9|11|13)?(?:b5|#5)?(?:\/[A-Ga-g](?:#|b)?)?/;
+function isChordToken(token){ return typeof token==='string' && CHORD_TOKEN.test(token.trim()) && CHORD_TOKEN.exec(token.trim())?.[0]===token.trim(); }
+function splitChordSequence(line){
+  const s=String(line||'').trim();
+  if(!s)return [];
+  const full=new RegExp(`^\\s*${CHORD_TOKEN.source}(?:(?:\\s+|[|,;:-]*?)${CHORD_TOKEN.source})*\\s*$`);
+  if(!full.test(s))return [];
+  const out=[]; let pos=0; const re=new RegExp(CHORD_TOKEN.source,'g'); let m;
+  while((m=re.exec(s))!==null){out.push(m[0]);pos=re.lastIndex;}
+  return out;
 }
-function chordCount(line){ return String(line||'').trim().split(/\s+/).filter(isChordToken).length; }
+function chordCount(line){
+  const seq=splitChordSequence(line);
+  return seq.length;
+}
 function fallbackBlocks(text){
   const lines=String(text||'').split(/\n+/).map(x=>x.replace(/[|]+/g,' ').replace(/\s+/g,' ').trim()).filter(Boolean);
   const out=[];
   for(let i=0;i<lines.length;i++){
-    const line=lines[i]; const count=chordCount(line);
-    if(count>=2 || (count===1 && /^[A-Ga-g][#b]?(?:m|min|maj|dim|aug|sus|add)?(?:2|4|5|6|7|9|11|13)?(?:\/[A-Ga-g][#b]?)?$/.test(line))){
+    const line=lines[i]; const seq=splitChordSequence(line);
+    if(seq.length>=2 || (seq.length===1 && isChordToken(line))){
       let anchor='';
       for(let j=i+1;j<Math.min(i+4,lines.length);j++){
         if(chordCount(lines[j])===0){anchor=lines[j].replace(/^[\s•*-]+/,'').trim();break;}
       }
-      out.push({selected:true,anchor:anchor?anchor.replace(/\.\.\.$/,''):'',chords:[line],lines:[{chords:line,lyric:''}]});
+      out.push({selected:true,anchor:anchor?anchor.replace(/\.\.\.$/,''):'',chords:[seq.join('  ')],lines:[{chords:seq.join('  '),lyric:''}]});
     }
   }
   return out;
@@ -78,10 +89,15 @@ function normalizeBlocks(data,text){
     const lines=Array.isArray(b?.lines)?b.lines.map(l=>({chords:typeof l?.chords==='string'?l.chords.trim():'',lyric:typeof l?.lyric==='string'?l.lyric.trim():''})).filter(l=>l.chords||l.lyric):[];
     const chords=Array.isArray(b?.chords)?b.chords.map(String).map(x=>x.trim()).filter(Boolean):(typeof b?.chords==='string'?b.chords.split('\n').map(x=>x.trim()).filter(Boolean):[]);
     const finalLines=lines.length?lines:chords.map(chords=>({chords,lyric:''}));
-    const anchor=typeof b?.anchor==='string'&&b.anchor.trim()?b.anchor.trim():(finalLines.find(l=>l.lyric)?.lyric||'');
-    return {...b,selected:b.selected!==false,lines:finalLines,anchor,chords:finalLines.map(l=>l.chords).filter(Boolean)};
+    const expanded=finalLines.map(l=>{const seq=splitChordSequence(l.chords);return {...l,chords:seq.length?seq.join('  '):l.chords};});
+    const anchor=typeof b?.anchor==='string'&&b.anchor.trim()?b.anchor.trim():(expanded.find(l=>l.lyric)?.lyric||'');
+    return {...b,selected:b.selected!==false,lines:expanded,anchor,chords:expanded.map(l=>l.chords).filter(Boolean)};
   }).filter(b=>b.lines.length||b.anchor);
-  return {...data,blocks:blocks.length?blocks:fallbackBlocks(text)};
+  const fallback=fallbackBlocks(text);
+  const aiChordLines=blocks.reduce((n,b)=>n+b.lines.filter(l=>splitChordSequence(l.chords).length>0).length,0);
+  // Se a IA perdeu linhas de acordes, use a leitura determinística do texto, que preserva todas as linhas.
+  const finalBlocks=fallback.length>aiChordLines?fallback:blocks;
+  return {...data,blocks:finalBlocks};
 }
 function transposeChordToken(token,semitones,flats){
   const m=String(token).match(/^([A-Ga-g])([#b]?)(.*)$/); if(!m)return token;
@@ -98,7 +114,7 @@ function transposeBlocks(data,fromKey,toKey){
 }
 
 async function aiOrganize(content){
-  const prompt=`Organize esta cifra para um editor e PDF. Retorne JSON válido com title, artist, key e blocks. NÃO invente acordes ou letras. Preserve rigorosamente a ordem das linhas de acordes. O conteúdo pode vir de PDF/TXT/HTML e pode ter acordes em linhas separadas das letras. Cada block é um trecho musical e deve conter selected=true, lines:[{chords,lyric}] e anchor. anchor deve ser SOMENTE o início curto do verso, sem a letra completa. Se houver várias linhas de acordes em um trecho, mantenha todas. Reconheça acordes como B, C#m, G#m7, E, F#, B4, B/D#. Identifique o tom original somente pelo material; nunca use número do arquivo como tom.`;
+  const prompt=`Organize esta cifra para um editor e PDF. Retorne JSON válido com title, artist, key e blocks. NÃO invente acordes ou letras. Preserve rigorosamente TODAS as linhas de acordes e a ordem em que aparecem no conteúdo. O conteúdo pode vir de PDF/TXT/HTML e pode ter acordes em linhas separadas das letras OU vários acordes colados na mesma linha, por exemplo EF#mC#m ou C#m7A. Separe mentalmente esses acordes, mas devolva a linha completa. Cada block é um trecho musical e deve conter selected=true, lines:[{chords,lyric}] e anchor. anchor deve ser SOMENTE o início curto do verso, sem a letra completa. Se houver várias linhas de acordes em um trecho, mantenha todas. Reconheça acordes como B, C#m, G#m7, E, F#, B4, B/D#. Identifique o tom original somente pelo material; nunca use número do arquivo como tom.`;
   const r=await openai.chat.completions.create({model:'gpt-4o-mini',response_format:{type:'json_object'},messages:[{role:'system',content:prompt},{role:'user',content:`Fonte: ${content.source||''}\nTítulo: ${content.title||''}\nArtista: ${content.artist||''}\nCifra:\n${content.text}`}]});
   return JSON.parse(r.choices[0].message.content||'{}');
 }
