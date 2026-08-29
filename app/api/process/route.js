@@ -53,7 +53,6 @@ async function readUploadedFile(file){
   throw new Error('Formato não suportado. Envie PDF, TXT ou HTML.');
 }
 
-// Reconhece acordes tanto separados quanto colados: "E F#m C#m", "EF#mC#m", "C#m7A", etc.
 const CHORD_TOKEN = /[A-Ga-g](?:#|b)?(?:maj|min|m|dim|aug|sus|add)?(?:2|4|5|6|7|9|11|13)?(?:b5|#5)?(?:\/[A-Ga-g](?:#|b)?)?/;
 function isChordToken(token){ return typeof token==='string' && CHORD_TOKEN.test(token.trim()) && CHORD_TOKEN.exec(token.trim())?.[0]===token.trim(); }
 function splitChordSequence(line){
@@ -65,7 +64,6 @@ function splitChordSequence(line){
     while((m=re.exec(compact))!==null) out.push(m[0]);
     return out;
   }
-  // Caso os acordes tenham sido colados pelo extrator do PDF.
   const compactNoSpace=compact.replace(/\s+/g,'');
   const out=[]; let pos=0; const re=new RegExp(CHORD_TOKEN.source,'g'); let m;
   while((m=re.exec(compactNoSpace))!==null){ if(m.index!==pos)return []; out.push(m[0]); pos=re.lastIndex; }
@@ -75,22 +73,25 @@ function normalizeChordLine(line){ const seq=splitChordSequence(line); return se
 function looksLikeChordLine(line){ const seq=splitChordSequence(line); return seq.length>=1; }
 function cleanAnchor(line){ return String(line||'').replace(/^[\s•*-]+/,'').replace(/\.\.\.$/,'').trim(); }
 
-// Estrutura determinística para PDFs/TXT: linhas consecutivas de acordes formam um único trecho,
-// e o primeiro texto logo depois vira somente a chamada inicial do verso. Isso evita os cartões
-// quebrados que estavam aparecendo quando a IA separava cada acorde em um bloco.
 function structureRawText(text){
   const raw=String(text||'').replace(/\r/g,'').split('\n').map(x=>x.trim()).filter(Boolean);
-  const blocks=[]; let chordLines=[];
+  const blocks=[]; let chordLines=[]; let lyricLines=[]; let section='';
   const flush=(anchor='')=>{
     if(!chordLines.length)return;
-    blocks.push({selected:true,anchor:cleanAnchor(anchor),chords:[...chordLines],lines:chordLines.map(chords=>({chords,lyric:''}))});
-    chordLines=[];
+    const lines=[...chordLines.map(chords=>({chords,lyric:''})),...lyricLines.map(lyric=>({chords:'',lyric}))];
+    blocks.push({selected:true,section,anchor:cleanAnchor(anchor||lyricLines[0]||''),chords:[...chordLines],lines});
+    chordLines=[]; lyricLines=[];
   };
   for(const line of raw){
-    if(looksLikeChordLine(line)){ chordLines.push(normalizeChordLine(line)); continue; }
-    if(chordLines.length){ flush(line); continue; }
+    if(/^\s*\[[^\]]+\]\s*$/.test(line)){ flush(); section=line.replace(/^\s*\[|\]\s*$/g,'').trim(); continue; }
+    if(looksLikeChordLine(line)){
+      if(lyricLines.length) flush();
+      chordLines.push(normalizeChordLine(line));
+      continue;
+    }
+    if(chordLines.length) lyricLines.push(line);
   }
-  flush('');
+  flush();
   return blocks;
 }
 
@@ -100,13 +101,11 @@ function normalizeBlocks(data,text){
     const lines=Array.isArray(b?.lines)?b.lines.map(l=>({chords:typeof l?.chords==='string'?normalizeChordLine(l.chords):'',lyric:typeof l?.lyric==='string'?l.lyric.trim():''})).filter(l=>l.chords||l.lyric):[];
     const chords=Array.isArray(b?.chords)?b.chords.map(x=>normalizeChordLine(String(x))).filter(Boolean):(typeof b?.chords==='string'?b.chords.split('\n').map(normalizeChordLine).filter(Boolean):[]);
     const finalLines=lines.length?lines:chords.map(chords=>({chords,lyric:''}));
-    return {...b,selected:b.selected!==false,lines:finalLines,anchor:cleanAnchor(b?.anchor||finalLines.find(l=>l.lyric)?.lyric||''),chords:finalLines.map(l=>l.chords).filter(Boolean)};
+    return {...b,selected:b.selected!==false,section:typeof b?.section==='string'?b.section.trim():'',lines:finalLines,anchor:cleanAnchor(b?.anchor||finalLines.find(l=>l.lyric)?.lyric||''),chords:finalLines.map(l=>l.chords).filter(Boolean)};
   }).filter(b=>b.lines.length||b.anchor);
-
   const rawBlocks=structureRawText(text);
-  // Se a resposta da IA perdeu uma quantidade relevante de linhas, o parser do arquivo ganha.
   const aiChordCount=blocks.reduce((n,b)=>n+b.lines.filter(l=>splitChordSequence(l.chords).length).length,0);
-  const rawChordCount=rawBlocks.reduce((n,b)=>n+b.lines.length,0);
+  const rawChordCount=rawBlocks.reduce((n,b)=>n+b.lines.filter(l=>l.chords).length,0);
   const finalBlocks=rawChordCount>aiChordCount+1?rawBlocks:(blocks.length?blocks:rawBlocks);
   return {...data,blocks:finalBlocks};
 }
@@ -126,7 +125,7 @@ function transposeBlocks(data,fromKey,toKey){
 }
 
 async function aiOrganize(content){
-  const prompt=`Organize esta cifra para um editor e PDF. Retorne JSON válido com title, artist, key e blocks. NÃO invente acordes nem letras. Preserve TODAS as linhas de acordes e a ordem exata do conteúdo. Uma sequência de linhas consecutivas de acordes pertence ao MESMO trecho; não crie um bloco para cada acorde. Exemplos: "E F#m C#m" é uma única linha; "EF#mC#m" deve virar "E  F#m  C#m"; "C#m7A" deve virar "C#m7  A". O bloco deve ter lines:[{chords,lyric}] com todas as linhas de acordes na mesma ordem. anchor deve conter SOMENTE o início curto do próximo verso, sem a letra completa e sem acordes. Não use a primeira nota encontrada como tom automaticamente: identifique o tom original pelo conjunto da cifra. Se a fonte já informa o tom, preserve-o. Nunca transponha durante a organização.`;
+  const prompt=`Organize esta cifra para um editor e PDF. Retorne JSON válido com title, artist, key e blocks. NÃO invente, remova, duplique ou resuma acordes ou letras. Preserve TODAS as partes, seções, linhas de acordes e letras na ordem exata da fonte. Reconheça acordes separados ou colados, por exemplo "E F#m C#m", "EF#mC#m" e "C#m7A". Cada bloco deve representar um trecho coerente entre grupos de acordes, e deve ter section quando houver um marcador como [Primeira Parte], [Pré-Refrão], [Refrão], [Solo], [Ponte] ou [Final]. Em lines, preserve a ordem visual da cifra: uma linha que contém acordes deve ser {chords:"E  F#m  C#m",lyric:""}; uma linha que contém letra deve ser {chords:"",lyric:"A luz do sol se apagou"}. Assim, as linhas de acordes ficam acima das linhas da letra, exatamente como na cifra original. Não transforme várias linhas de acordes em vários cartões quando elas pertencem ao mesmo trecho. anchor deve ser apenas a primeira linha de letra do bloco. Não use a primeira nota encontrada como tom automaticamente: identifique o tom original pelo conjunto da cifra. Se a fonte informa o tom, preserve-o. Nunca transponha durante a organização.`;
   const r=await openai.chat.completions.create({model:'gpt-4o-mini',response_format:{type:'json_object'},messages:[{role:'system',content:prompt},{role:'user',content:`Fonte: ${content.source||''}\nTítulo: ${content.title||''}\nArtista: ${content.artist||''}\nCifra:\n${content.text}`}]});
   return JSON.parse(r.choices[0].message.content||'{}');
 }
@@ -141,7 +140,6 @@ export async function POST(request){
     }else{const body=await request.json();url=String(body.url||'').trim();targetKey=String(body.targetKey||'').trim();}
     if(!content){if(!isCifraClubUrl(url))return Response.json({error:'Cole um link válido do Cifra Club ou envie um arquivo.'},{status:400});content=await fetchCifraContent(url);}
     if(!content.text||content.text.trim().length<20) throw new Error('O arquivo não trouxe texto suficiente. Se for um PDF escaneado/imagem, envie uma versão com texto selecionável ou TXT/HTML.');
-
     let data=normalizeBlocks(await aiOrganize(content),content.text);
     if(!data.title)data.title=content.title||''; if(!data.artist)data.artist=content.artist||'';
     const originalKey=normalizeKey(data.key); data.originalKey=originalKey||data.key||'';
