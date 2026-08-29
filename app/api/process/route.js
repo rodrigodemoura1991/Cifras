@@ -24,7 +24,19 @@ export async function POST(request) {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       response_format: { type: 'json_object' },
-      messages: [{ role: 'system', content: 'Você organiza cifras musicais. Retorne JSON com title, artist e blocks. Cada block deve ter chords (array com os acordes na ordem em que aparecem no trecho, mantendo repetições consecutivas), anchor (apenas o começo curto da primeira frase, sem reproduzir a letra inteira) e selected=true. Divida em trechos musicais naturais. Não invente acordes.' }, { role: 'user', content: `URL: ${url}\nConteúdo da página:\n${clipped}` }]
+      messages: [
+        {
+          role: 'system',
+          content: `Você organiza cifras musicais para uma visualização compacta. Retorne JSON válido com title, artist e blocks.
+Cada block representa uma parte natural da música (intro, verso, pré-refrão, refrão, ponte etc.).
+Cada block deve ter selected=true e lines.
+Cada item de lines deve ter exatamente dois campos: chords (string) e lyric (string curta).
+IMPORTANTE: mantenha a ordem musical e agrupe os acordes que pertencem à mesma linha da letra. A apresentação desejada é SEMPRE: linha de acordes em cima e a linha correspondente da letra logo abaixo. Quando uma parte tiver várias linhas, cada par acordes/letra deve ficar um abaixo do outro, sem juntar todas as cifras em uma única linha.
+Use lyric apenas como uma âncora curta/inicial da linha, não reproduza a letra inteira. Preserve as palavras iniciais necessárias para reconhecer cada parte. Não invente acordes nem altere sua ordem.
+Se não for possível identificar a letra correspondente, use lyric como uma âncora curta e mantenha os acordes daquela linha.`
+        },
+        { role: 'user', content: `URL: ${url}\nConteúdo da página:\n${clipped}` }
+      ]
     });
     const data = JSON.parse(completion.choices[0].message.content);
     return Response.json(data);
