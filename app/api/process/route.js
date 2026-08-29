@@ -4,236 +4,121 @@ import pdfParse from 'pdf-parse';
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const API_FALLBACK = 'https://cifraclub-api.vercel.app/api/cifra';
 
-function isCifraClubUrl(value) {
-  try {
-    const u = new URL(value);
-    return u.hostname === 'www.cifraclub.com.br' || u.hostname === 'cifraclub.com.br';
-  } catch {
-    return false;
-  }
-}
+const NOTE_VALUES = { C:0,'C#':1,Db:1,D:2,'D#':3,Eb:3,E:4,F:5,'F#':6,Gb:6,G:7,'G#':8,Ab:8,A:9,'A#':10,Bb:10,B:11 };
+const SHARPS = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const FLATS = ['C','Db','D','Eb','E','F','Gb','G','Ab','A','Bb','B'];
 
-function slug(value) {
-  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-}
-
-function getArtistSongFromUrl(value) {
-  const u = new URL(value);
-  const parts = u.pathname.split('/').filter(Boolean).map(decodeURIComponent);
-  const ignored = new Set(['letra', 'imprimir', 'tab', 'tabs', 'guitarra', 'violao', 'bateria']);
-  const useful = parts.filter(p => !ignored.has(p.toLowerCase()));
-  if (useful.length < 2) return null;
-  return { artist: slug(useful[0]), song: slug(useful[1]) };
-}
-
-function htmlToStructuredText(html) {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<br\s*\/?>(?=.)/gi, '\n')
-    .replace(/<\/(p|div|li|tr|section|article|h[1-6])\s*>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/\r/g, '')
-    .split('\n')
-    .map(line => line.replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-    .join('\n');
-}
-
-function normalizeBlocks(data) {
-  if (!Array.isArray(data?.blocks)) return { ...data, blocks: [] };
-  const blocks = data.blocks.map(block => {
-    const lines = Array.isArray(block.lines)
-      ? block.lines.map(line => ({
-          chords: typeof line?.chords === 'string' ? line.chords.trim() : '',
-          lyric: typeof line?.lyric === 'string' ? line.lyric.trim() : ''
-        })).filter(line => line.chords || line.lyric)
-      : [];
-    const fallbackChords = Array.isArray(block.chords)
-      ? block.chords.map(v => String(v).trim()).filter(Boolean)
-      : (typeof block.chords === 'string' ? block.chords.split('\n').map(v => v.trim()).filter(Boolean) : []);
-    const finalLines = lines.length ? lines : fallbackChords.map(chords => ({ chords, lyric: '' }));
-    const anchor = typeof block.anchor === 'string' && block.anchor.trim()
-      ? block.anchor.trim()
-      : (finalLines.find(line => line.lyric)?.lyric || '');
-    return { ...block, lines: finalLines, anchor };
-  }).filter(block => block.lines.length || block.anchor);
-  return { ...data, blocks };
-}
-
-function noteValue(note) {
-  const map = { C: 0, 'C#': 1, Db: 1, D: 2, 'D#': 3, Eb: 3, E: 4, F: 5, 'F#': 6, Gb: 6, G: 7, 'G#': 8, Ab: 8, A: 9, 'A#': 10, Bb: 10, B: 11 };
-  return map[note] ?? null;
-}
-
-function normalizeKey(key) {
-  if (typeof key !== 'string') return '';
-  const m = key.trim().match(/^([A-Ga-g])([#b]?)(?:m)?$/);
+function noteValue(n){ return NOTE_VALUES[n] ?? null; }
+function normalizeKey(key){
+  if(typeof key !== 'string') return '';
+  const m=key.trim().match(/^([A-Ga-g])([#b]?)(?:m)?$/);
   return m ? `${m[1].toUpperCase()}${m[2]}` : '';
 }
-
-function transposeChordToken(token, semitones, preferFlats) {
-  const match = token.match(/^([A-Ga-g])([#b]?)(.*)$/);
-  if (!match) return token;
-  const root = `${match[1].toUpperCase()}${match[2]}`;
-  if (noteValue(root) === null) return token;
-  const suffix = match[3] || '';
-  const bassMatch = suffix.match(/^(.*?)(?:\/)([A-Ga-g])([#b]?)$/);
-  const quality = bassMatch ? bassMatch[1] : suffix;
-  const bass = bassMatch ? `${bassMatch[2].toUpperCase()}${bassMatch[3]}` : '';
-  const sharpNotes = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-  const flatNotes = ['C','Db','D','Eb','E','F','Gb','G','Ab','A','Bb','B'];
-  const notes = preferFlats ? flatNotes : sharpNotes;
-  const newRoot = notes[(noteValue(root) + semitones + 120) % 12];
-  const newBass = bass && noteValue(bass) !== null ? `/${notes[(noteValue(bass) + semitones + 120) % 12]}` : '';
-  return `${newRoot}${quality}${newBass}`;
+function slug(v){ return String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9-]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,''); }
+function isCifraClubUrl(value){ try{const u=new URL(value);return ['www.cifraclub.com.br','cifraclub.com.br'].includes(u.hostname);}catch{return false;} }
+function getArtistSongFromUrl(value){
+  const u=new URL(value); const parts=u.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  const ignored=new Set(['letra','imprimir','tab','tabs','guitarra','violao','bateria']);
+  const useful=parts.filter(p=>!ignored.has(p.toLowerCase()));
+  return useful.length>=2 ? {artist:slug(useful[0]),song:slug(useful[1])} : null;
 }
-
-function transposeChordLine(line, semitones, preferFlats) {
-  return String(line || '').split(/(\s+)/).map(token => {
-    if (!/^([A-Ga-g])([#b]?)(.*)$/.test(token)) return token;
-    const chordLike = /^([A-Ga-g])([#b]?)(?:(?:maj|min|m|M|dim|aug|sus|add)?(?:2|4|5|6|7|9|11|13)?(?:b5|#5)?)(?:\/[A-Ga-g][#b]?)?$/.test(token);
-    return chordLike ? transposeChordToken(token, semitones, preferFlats) : token;
-  }).join('');
+function htmlToText(html){
+  return String(html||'').replace(/<script[\s\S]*?<\/script>/gi,' ').replace(/<style[\s\S]*?<\/style>/gi,' ')
+    .replace(/<br\s*\/?>(?=.)/gi,'\n').replace(/<\/(p|div|li|tr|section|article|h[1-6])\s*>/gi,'\n')
+    .replace(/<[^>]+>/g,' ').replace(/&nbsp;/gi,' ').replace(/&amp;/gi,'&').replace(/&quot;/gi,'"').replace(/&#39;/gi,"'")
+    .replace(/\r/g,'').split('\n').map(x=>x.replace(/\s+/g,' ').trim()).filter(Boolean).join('\n');
 }
-
-function transposeBlocks(data, originalKey, targetKey) {
-  const from = noteValue(normalizeKey(originalKey));
-  const to = noteValue(normalizeKey(targetKey));
-  if (from === null || to === null || !Array.isArray(data?.blocks)) return data;
-  const semitones = (to - from + 12) % 12;
-  const preferFlats = /b/.test(normalizeKey(targetKey));
-  return {
-    ...data,
-    key: normalizeKey(targetKey),
-    blocks: data.blocks.map(block => ({
-      ...block,
-      chords: Array.isArray(block.chords) ? block.chords.map(line => transposeChordLine(line, semitones, preferFlats)) : block.chords,
-      lines: Array.isArray(block.lines) ? block.lines.map(line => ({ ...line, chords: transposeChordLine(line.chords, semitones, preferFlats) })) : block.lines
-    }))
-  };
+async function fetchCifraContent(url){
+  const source=getArtistSongFromUrl(url);
+  if(source){
+    try{
+      const r=await fetch(`${API_FALLBACK}?artist=${encodeURIComponent(source.artist)}&song=${encodeURIComponent(source.song)}`,{headers:{Accept:'application/json'},cache:'no-store'});
+      if(r.ok){const d=await r.json();if(Array.isArray(d?.cifra)&&d.cifra.length)return {text:d.cifra.join('\n'),title:d.name||source.song,artist:d.artist||source.artist,source:'cifraclub-api'};}
+    }catch(_){ }
+  }
+  const page=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0 (compatible; CifrasPDF/1.0)'},cache:'no-store'});
+  if(!page.ok) throw new Error('O Cifra Club não permitiu acessar essa página agora.');
+  return {text:htmlToText(await page.text()).slice(0,60000),source:'cifraclub-html'};
 }
-
-async function fetchCifraContent(url) {
-  const source = getArtistSongFromUrl(url);
-  if (source) {
-    try {
-      const apiUrl = `${API_FALLBACK}?artist=${encodeURIComponent(source.artist)}&song=${encodeURIComponent(source.song)}`;
-      const apiResponse = await fetch(apiUrl, { headers: { Accept: 'application/json' }, cache: 'no-store' });
-      if (apiResponse.ok) {
-        const apiData = await apiResponse.json();
-        if (Array.isArray(apiData?.cifra) && apiData.cifra.length) {
-          return {
-            text: apiData.cifra.join('\n'),
-            title: apiData.name || source.song,
-            artist: apiData.artist || source.artist,
-            source: 'cifraclub-api'
-          };
-        }
-      }
-    } catch (_) {}
+async function readUploadedFile(file){
+  const name=(file.name||'arquivo').toLowerCase(), type=(file.type||'').toLowerCase();
+  const bytes=Buffer.from(await file.arrayBuffer());
+  if(bytes.length>10*1024*1024) throw new Error('O arquivo deve ter no máximo 10 MB.');
+  if(type==='application/pdf'||name.endsWith('.pdf')){
+    const parsed=await pdfParse(bytes);
+    return {text:String(parsed.text||'').slice(0,60000),title:file.name.replace(/\.pdf$/i,''),artist:'',source:'uploaded-pdf'};
   }
-
-  const page = await fetch(url, {
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CifrasPDF/1.0)' },
-    cache: 'no-store'
-  });
-  if (!page.ok) throw new Error('O Cifra Club não permitiu acessar essa página agora.');
-  const html = await page.text();
-  return { text: htmlToStructuredText(html).slice(0, 60000), source: 'cifraclub-html' };
-}
-
-async function readUploadedFile(file) {
-  const name = (file.name || 'arquivo').toLowerCase();
-  const type = (file.type || '').toLowerCase();
-  const bytes = Buffer.from(await file.arrayBuffer());
-  if (bytes.length > 10 * 1024 * 1024) throw new Error('O arquivo deve ter no máximo 10 MB.');
-
-  if (type === 'application/pdf' || name.endsWith('.pdf')) {
-    const parsed = await pdfParse(bytes);
-    return { text: parsed.text.slice(0, 60000), title: file.name.replace(/\.pdf$/i, ''), artist: '', source: 'uploaded-pdf' };
-  }
-
-  if (type.includes('html') || /\.(html?|htm)$/i.test(name)) {
-    return { text: htmlToStructuredText(bytes.toString('utf8')).slice(0, 60000), title: file.name.replace(/\.(html?|htm)$/i, ''), artist: '', source: 'uploaded-html' };
-  }
-
-  if (type.startsWith('text/') || /\.(txt|md|csv)$/i.test(name)) {
-    return { text: bytes.toString('utf8').slice(0, 60000), title: file.name.replace(/\.(txt|md|csv)$/i, ''), artist: '', source: 'uploaded-text' };
-  }
-
+  if(type.includes('html')||/\.(html?|htm)$/i.test(name)) return {text:htmlToText(bytes.toString('utf8')).slice(0,60000),title:file.name.replace(/\.(html?|htm)$/i,''),artist:'',source:'uploaded-html'};
+  if(type.startsWith('text/')||/\.(txt|md|csv)$/i.test(name)) return {text:bytes.toString('utf8').slice(0,60000),title:file.name.replace(/\.(txt|md|csv)$/i,''),artist:'',source:'uploaded-text'};
   throw new Error('Formato não suportado. Envie PDF, TXT ou HTML.');
 }
 
-export async function POST(request) {
-  try {
-    if (!process.env.OPENAI_API_KEY) return Response.json({ error: 'OPENAI_API_KEY ainda não foi configurada na Vercel.' }, { status: 500 });
-
-    const contentType = request.headers.get('content-type') || '';
-    let url = '';
-    let targetKey = '';
-    let content;
-
-    if (contentType.includes('multipart/form-data')) {
-      const form = await request.formData();
-      url = String(form.get('url') || '').trim();
-      targetKey = String(form.get('targetKey') || '').trim();
-      const file = form.get('file');
-      if (file && typeof file !== 'string') content = await readUploadedFile(file);
-    } else {
-      const body = await request.json();
-      url = String(body.url || '').trim();
-      targetKey = String(body.targetKey || '').trim();
+function isChordToken(token){
+  return /^([A-Ga-g])([#b]?)(?:maj|min|m|dim|aug|sus|add)?(?:2|4|5|6|7|9|11|13)?(?:b5|#5)?(?:\/[A-Ga-g][#b]?)?$/.test(token);
+}
+function chordCount(line){ return String(line||'').trim().split(/\s+/).filter(isChordToken).length; }
+function fallbackBlocks(text){
+  const lines=String(text||'').split(/\n+/).map(x=>x.replace(/[|]+/g,' ').replace(/\s+/g,' ').trim()).filter(Boolean);
+  const out=[];
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i]; const count=chordCount(line);
+    if(count>=2 || (count===1 && /^[A-Ga-g][#b]?(?:m|min|maj|dim|aug|sus|add)?(?:2|4|5|6|7|9|11|13)?(?:\/[A-Ga-g][#b]?)?$/.test(line))){
+      let anchor='';
+      for(let j=i+1;j<Math.min(i+4,lines.length);j++){
+        if(chordCount(lines[j])===0){anchor=lines[j].replace(/^[\s•*-]+/,'').trim();break;}
+      }
+      out.push({selected:true,anchor:anchor?anchor.replace(/\.\.\.$/,''):'',chords:[line],lines:[{chords:line,lyric:''}]});
     }
-
-    if (!content) {
-      if (!isCifraClubUrl(url)) return Response.json({ error: 'Cole um link válido do Cifra Club ou envie um arquivo.' }, { status: 400 });
-      content = await fetchCifraContent(url);
-    }
-
-    if (!content.text || content.text.trim().length < 20) throw new Error('Não consegui encontrar conteúdo suficiente para reconhecer a cifra.');
-
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'system',
-          content: `Organize a cifra para visualização e PDF. Retorne JSON válido com title, artist, key e blocks.
-
-O CONTEÚDO RECEBIDO PODE VIR DE PDF, TXT, HTML OU Cifra Club. Preserve a estrutura musical e NÃO descarte linhas de acordes só porque estão separadas das letras.
-
-IDENTIFICAÇÃO DO TOM: encontre o tom original informado no material. Se não houver informação confiável, deduza somente quando houver evidência musical clara nos acordes. Nunca use números da URL ou do nome do arquivo como tom.
-
-Cada block é uma parte natural (Intro, Primeira Parte, Pré-Refrão, Refrão, Ponte, Solo etc.). Cada block deve ter selected=true e lines. Preserve a ordem e as quebras musicais originais. Uma linha de acordes deve continuar sendo uma linha de acordes. Use somente a frase inicial curta de cada trecho como lyric/anchor; não invente letras.
-
-IMPORTANTE: mantenha os acordes exatamente reconhecíveis para edição posterior, por exemplo B, C#m, G#m7, E, F#, B4, B/D#, etc. Não transforme acordes em descrições. Se houver várias linhas de acordes em um trecho, mantenha todas.`
-        },
-        {
-          role: 'user',
-          content: `Fonte: ${content.source || ''}\nTítulo detectado: ${content.title || ''}\nArtista detectado: ${content.artist || ''}\nConteúdo da cifra:\n${content.text.slice(0, 60000)}`
-        }
-      ]
-    });
-
-    let data = normalizeBlocks(JSON.parse(completion.choices[0].message.content));
-    if (!data.title && content.title) data.title = content.title;
-    if (!data.artist && content.artist) data.artist = content.artist;
-    const originalKey = normalizeKey(data.key);
-    data.originalKey = originalKey || data.key || '';
-
-    if (!data.blocks.length) throw new Error('A cifra foi lida, mas os acordes não foram reconhecidos. Confira se o arquivo contém a cifra e tente novamente.');
-
-    const desired = normalizeKey(typeof targetKey === 'string' ? targetKey : '');
-    if (desired) data = transposeBlocks(data, originalKey || data.key, desired);
-    else data.key = originalKey;
-
-    return Response.json(data);
-  } catch (error) {
-    return Response.json({ error: error?.message || 'Erro ao processar a cifra.' }, { status: 500 });
   }
+  return out;
+}
+function normalizeBlocks(data,text){
+  if(!Array.isArray(data?.blocks)) data={...(data||{}),blocks:[]};
+  const blocks=data.blocks.map(b=>{
+    const lines=Array.isArray(b?.lines)?b.lines.map(l=>({chords:typeof l?.chords==='string'?l.chords.trim():'',lyric:typeof l?.lyric==='string'?l.lyric.trim():''})).filter(l=>l.chords||l.lyric):[];
+    const chords=Array.isArray(b?.chords)?b.chords.map(String).map(x=>x.trim()).filter(Boolean):(typeof b?.chords==='string'?b.chords.split('\n').map(x=>x.trim()).filter(Boolean):[]);
+    const finalLines=lines.length?lines:chords.map(chords=>({chords,lyric:''}));
+    const anchor=typeof b?.anchor==='string'&&b.anchor.trim()?b.anchor.trim():(finalLines.find(l=>l.lyric)?.lyric||'');
+    return {...b,selected:b.selected!==false,lines:finalLines,anchor,chords:finalLines.map(l=>l.chords).filter(Boolean)};
+  }).filter(b=>b.lines.length||b.anchor);
+  return {...data,blocks:blocks.length?blocks:fallbackBlocks(text)};
+}
+function transposeChordToken(token,semitones,flats){
+  const m=String(token).match(/^([A-Ga-g])([#b]?)(.*)$/); if(!m)return token;
+  const root=`${m[1].toUpperCase()}${m[2]}`; if(noteValue(root)===null)return token;
+  const suffix=m[3]||''; const bassMatch=suffix.match(/^(.*)\/([A-Ga-g])([#b]?)$/); const quality=bassMatch?bassMatch[1]:suffix; const bass=bassMatch?`${bassMatch[2].toUpperCase()}${bassMatch[3]}`:'';
+  const notes=flats?FLATS:SHARPS; const newRoot=notes[(noteValue(root)+semitones+120)%12]; const newBass=bass&&noteValue(bass)!==null?`/${notes[(noteValue(bass)+semitones+120)%12]}`:'';
+  return `${newRoot}${quality}${newBass}`;
+}
+function transposeLine(line,semitones,flats){ return String(line||'').split(/(\s+)/).map(t=>isChordToken(t)?transposeChordToken(t,semitones,flats):t).join(''); }
+function transposeBlocks(data,fromKey,toKey){
+  const from=noteValue(normalizeKey(fromKey)),to=noteValue(normalizeKey(toKey)); if(from===null||to===null)return data;
+  const semitones=(to-from+12)%12, flats=/b/.test(normalizeKey(toKey));
+  return {...data,key:normalizeKey(toKey),blocks:data.blocks.map(b=>({...b,chords:Array.isArray(b.chords)?b.chords.map(x=>transposeLine(x,semitones,flats)):b.chords,lines:Array.isArray(b.lines)?b.lines.map(l=>({...l,chords:transposeLine(l.chords,semitones,flats)})):b.lines}))};
+}
+
+async function aiOrganize(content){
+  const prompt=`Organize esta cifra para um editor e PDF. Retorne JSON válido com title, artist, key e blocks. NÃO invente acordes ou letras. Preserve rigorosamente a ordem das linhas de acordes. O conteúdo pode vir de PDF/TXT/HTML e pode ter acordes em linhas separadas das letras. Cada block é um trecho musical e deve conter selected=true, lines:[{chords,lyric}] e anchor. anchor deve ser SOMENTE o início curto do verso, sem a letra completa. Se houver várias linhas de acordes em um trecho, mantenha todas. Reconheça acordes como B, C#m, G#m7, E, F#, B4, B/D#. Identifique o tom original somente pelo material; nunca use número do arquivo como tom.`;
+  const r=await openai.chat.completions.create({model:'gpt-4o-mini',response_format:{type:'json_object'},messages:[{role:'system',content:prompt},{role:'user',content:`Fonte: ${content.source||''}\nTítulo: ${content.title||''}\nArtista: ${content.artist||''}\nCifra:\n${content.text}`}]});
+  return JSON.parse(r.choices[0].message.content||'{}');
+}
+
+export async function POST(request){
+  try{
+    if(!process.env.OPENAI_API_KEY) return Response.json({error:'OPENAI_API_KEY ainda não foi configurada na Vercel.'},{status:500});
+    let url='',targetKey='',content;
+    const ct=request.headers.get('content-type')||'';
+    if(ct.includes('multipart/form-data')){
+      const form=await request.formData(); url=String(form.get('url')||'').trim(); targetKey=String(form.get('targetKey')||'').trim(); const file=form.get('file'); if(file&&typeof file!=='string')content=await readUploadedFile(file);
+    }else{const body=await request.json();url=String(body.url||'').trim();targetKey=String(body.targetKey||'').trim();}
+    if(!content){if(!isCifraClubUrl(url))return Response.json({error:'Cole um link válido do Cifra Club ou envie um arquivo.'},{status:400});content=await fetchCifraContent(url);}
+    if(!content.text||content.text.trim().length<20) throw new Error('O arquivo não trouxe texto suficiente. Se for um PDF escaneado/imagem, envie uma versão com texto selecionável ou TXT/HTML.');
+
+    let data=normalizeBlocks(await aiOrganize(content),content.text);
+    if(!data.title)data.title=content.title||''; if(!data.artist)data.artist=content.artist||'';
+    const originalKey=normalizeKey(data.key); data.originalKey=originalKey||data.key||'';
+    if(!data.blocks.length) throw new Error('A cifra foi lida, mas não consegui localizar linhas de acordes. Vou melhorar esse reconhecimento para este tipo de arquivo.');
+    const desired=normalizeKey(targetKey); if(desired)data=transposeBlocks(data,originalKey||data.key,desired); else data.key=originalKey;
+    return Response.json(data);
+  }catch(error){return Response.json({error:error?.message||'Erro ao processar a cifra.'},{status:500});}
 }
