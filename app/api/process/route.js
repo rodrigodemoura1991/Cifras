@@ -53,52 +53,64 @@ async function readUploadedFile(file){
   throw new Error('Formato não suportado. Envie PDF, TXT ou HTML.');
 }
 
+// Reconhece acordes tanto separados quanto colados: "E F#m C#m", "EF#mC#m", "C#m7A", etc.
 const CHORD_TOKEN = /[A-Ga-g](?:#|b)?(?:maj|min|m|dim|aug|sus|add)?(?:2|4|5|6|7|9|11|13)?(?:b5|#5)?(?:\/[A-Ga-g](?:#|b)?)?/;
 function isChordToken(token){ return typeof token==='string' && CHORD_TOKEN.test(token.trim()) && CHORD_TOKEN.exec(token.trim())?.[0]===token.trim(); }
 function splitChordSequence(line){
-  const s=String(line||'').trim();
-  if(!s)return [];
+  const s=String(line||'').trim(); if(!s)return [];
+  const compact=s.replace(/[|,;]+/g,' ').trim();
   const full=new RegExp(`^\\s*${CHORD_TOKEN.source}(?:(?:\\s+|[|,;:-]*?)${CHORD_TOKEN.source})*\\s*$`);
-  if(!full.test(s))return [];
-  const out=[]; let pos=0; const re=new RegExp(CHORD_TOKEN.source,'g'); let m;
-  while((m=re.exec(s))!==null){out.push(m[0]);pos=re.lastIndex;}
-  return out;
-}
-function chordCount(line){
-  const seq=splitChordSequence(line);
-  return seq.length;
-}
-function fallbackBlocks(text){
-  const lines=String(text||'').split(/\n+/).map(x=>x.replace(/[|]+/g,' ').replace(/\s+/g,' ').trim()).filter(Boolean);
-  const out=[];
-  for(let i=0;i<lines.length;i++){
-    const line=lines[i]; const seq=splitChordSequence(line);
-    if(seq.length>=2 || (seq.length===1 && isChordToken(line))){
-      let anchor='';
-      for(let j=i+1;j<Math.min(i+4,lines.length);j++){
-        if(chordCount(lines[j])===0){anchor=lines[j].replace(/^[\s•*-]+/,'').trim();break;}
-      }
-      out.push({selected:true,anchor:anchor?anchor.replace(/\.\.\.$/,''):'',chords:[seq.join('  ')],lines:[{chords:seq.join('  '),lyric:''}]});
-    }
+  if(full.test(compact)){
+    const out=[]; const re=new RegExp(CHORD_TOKEN.source,'g'); let m;
+    while((m=re.exec(compact))!==null) out.push(m[0]);
+    return out;
   }
-  return out;
+  // Caso os acordes tenham sido colados pelo extrator do PDF.
+  const compactNoSpace=compact.replace(/\s+/g,'');
+  const out=[]; let pos=0; const re=new RegExp(CHORD_TOKEN.source,'g'); let m;
+  while((m=re.exec(compactNoSpace))!==null){ if(m.index!==pos)return []; out.push(m[0]); pos=re.lastIndex; }
+  return pos===compactNoSpace.length?out:[];
 }
+function normalizeChordLine(line){ const seq=splitChordSequence(line); return seq.length?seq.join('  '):String(line||'').trim(); }
+function looksLikeChordLine(line){ const seq=splitChordSequence(line); return seq.length>=1; }
+function cleanAnchor(line){ return String(line||'').replace(/^[\s•*-]+/,'').replace(/\.\.\.$/,'').trim(); }
+
+// Estrutura determinística para PDFs/TXT: linhas consecutivas de acordes formam um único trecho,
+// e o primeiro texto logo depois vira somente a chamada inicial do verso. Isso evita os cartões
+// quebrados que estavam aparecendo quando a IA separava cada acorde em um bloco.
+function structureRawText(text){
+  const raw=String(text||'').replace(/\r/g,'').split('\n').map(x=>x.trim()).filter(Boolean);
+  const blocks=[]; let chordLines=[];
+  const flush=(anchor='')=>{
+    if(!chordLines.length)return;
+    blocks.push({selected:true,anchor:cleanAnchor(anchor),chords:[...chordLines],lines:chordLines.map(chords=>({chords,lyric:''}))});
+    chordLines=[];
+  };
+  for(const line of raw){
+    if(looksLikeChordLine(line)){ chordLines.push(normalizeChordLine(line)); continue; }
+    if(chordLines.length){ flush(line); continue; }
+  }
+  flush('');
+  return blocks;
+}
+
 function normalizeBlocks(data,text){
-  if(!Array.isArray(data?.blocks)) data={...(data||{}),blocks:[]};
-  const blocks=data.blocks.map(b=>{
-    const lines=Array.isArray(b?.lines)?b.lines.map(l=>({chords:typeof l?.chords==='string'?l.chords.trim():'',lyric:typeof l?.lyric==='string'?l.lyric.trim():''})).filter(l=>l.chords||l.lyric):[];
-    const chords=Array.isArray(b?.chords)?b.chords.map(String).map(x=>x.trim()).filter(Boolean):(typeof b?.chords==='string'?b.chords.split('\n').map(x=>x.trim()).filter(Boolean):[]);
+  const aiBlocks=Array.isArray(data?.blocks)?data.blocks:[];
+  const blocks=aiBlocks.map(b=>{
+    const lines=Array.isArray(b?.lines)?b.lines.map(l=>({chords:typeof l?.chords==='string'?normalizeChordLine(l.chords):'',lyric:typeof l?.lyric==='string'?l.lyric.trim():''})).filter(l=>l.chords||l.lyric):[];
+    const chords=Array.isArray(b?.chords)?b.chords.map(x=>normalizeChordLine(String(x))).filter(Boolean):(typeof b?.chords==='string'?b.chords.split('\n').map(normalizeChordLine).filter(Boolean):[]);
     const finalLines=lines.length?lines:chords.map(chords=>({chords,lyric:''}));
-    const expanded=finalLines.map(l=>{const seq=splitChordSequence(l.chords);return {...l,chords:seq.length?seq.join('  '):l.chords};});
-    const anchor=typeof b?.anchor==='string'&&b.anchor.trim()?b.anchor.trim():(expanded.find(l=>l.lyric)?.lyric||'');
-    return {...b,selected:b.selected!==false,lines:expanded,anchor,chords:expanded.map(l=>l.chords).filter(Boolean)};
+    return {...b,selected:b.selected!==false,lines:finalLines,anchor:cleanAnchor(b?.anchor||finalLines.find(l=>l.lyric)?.lyric||''),chords:finalLines.map(l=>l.chords).filter(Boolean)};
   }).filter(b=>b.lines.length||b.anchor);
-  const fallback=fallbackBlocks(text);
-  const aiChordLines=blocks.reduce((n,b)=>n+b.lines.filter(l=>splitChordSequence(l.chords).length>0).length,0);
-  // Se a IA perdeu linhas de acordes, use a leitura determinística do texto, que preserva todas as linhas.
-  const finalBlocks=fallback.length>aiChordLines?fallback:blocks;
+
+  const rawBlocks=structureRawText(text);
+  // Se a resposta da IA perdeu uma quantidade relevante de linhas, o parser do arquivo ganha.
+  const aiChordCount=blocks.reduce((n,b)=>n+b.lines.filter(l=>splitChordSequence(l.chords).length).length,0);
+  const rawChordCount=rawBlocks.reduce((n,b)=>n+b.lines.length,0);
+  const finalBlocks=rawChordCount>aiChordCount+1?rawBlocks:(blocks.length?blocks:rawBlocks);
   return {...data,blocks:finalBlocks};
 }
+
 function transposeChordToken(token,semitones,flats){
   const m=String(token).match(/^([A-Ga-g])([#b]?)(.*)$/); if(!m)return token;
   const root=`${m[1].toUpperCase()}${m[2]}`; if(noteValue(root)===null)return token;
@@ -114,7 +126,7 @@ function transposeBlocks(data,fromKey,toKey){
 }
 
 async function aiOrganize(content){
-  const prompt=`Organize esta cifra para um editor e PDF. Retorne JSON válido com title, artist, key e blocks. NÃO invente acordes ou letras. Preserve rigorosamente TODAS as linhas de acordes e a ordem em que aparecem no conteúdo. O conteúdo pode vir de PDF/TXT/HTML e pode ter acordes em linhas separadas das letras OU vários acordes colados na mesma linha, por exemplo EF#mC#m ou C#m7A. Separe mentalmente esses acordes, mas devolva a linha completa. Cada block é um trecho musical e deve conter selected=true, lines:[{chords,lyric}] e anchor. anchor deve ser SOMENTE o início curto do verso, sem a letra completa. Se houver várias linhas de acordes em um trecho, mantenha todas. Reconheça acordes como B, C#m, G#m7, E, F#, B4, B/D#. Identifique o tom original somente pelo material; nunca use número do arquivo como tom.`;
+  const prompt=`Organize esta cifra para um editor e PDF. Retorne JSON válido com title, artist, key e blocks. NÃO invente acordes nem letras. Preserve TODAS as linhas de acordes e a ordem exata do conteúdo. Uma sequência de linhas consecutivas de acordes pertence ao MESMO trecho; não crie um bloco para cada acorde. Exemplos: "E F#m C#m" é uma única linha; "EF#mC#m" deve virar "E  F#m  C#m"; "C#m7A" deve virar "C#m7  A". O bloco deve ter lines:[{chords,lyric}] com todas as linhas de acordes na mesma ordem. anchor deve conter SOMENTE o início curto do próximo verso, sem a letra completa e sem acordes. Não use a primeira nota encontrada como tom automaticamente: identifique o tom original pelo conjunto da cifra. Se a fonte já informa o tom, preserve-o. Nunca transponha durante a organização.`;
   const r=await openai.chat.completions.create({model:'gpt-4o-mini',response_format:{type:'json_object'},messages:[{role:'system',content:prompt},{role:'user',content:`Fonte: ${content.source||''}\nTítulo: ${content.title||''}\nArtista: ${content.artist||''}\nCifra:\n${content.text}`}]});
   return JSON.parse(r.choices[0].message.content||'{}');
 }
@@ -133,7 +145,7 @@ export async function POST(request){
     let data=normalizeBlocks(await aiOrganize(content),content.text);
     if(!data.title)data.title=content.title||''; if(!data.artist)data.artist=content.artist||'';
     const originalKey=normalizeKey(data.key); data.originalKey=originalKey||data.key||'';
-    if(!data.blocks.length) throw new Error('A cifra foi lida, mas não consegui localizar linhas de acordes. Vou melhorar esse reconhecimento para este tipo de arquivo.');
+    if(!data.blocks.length) throw new Error('A cifra foi lida, mas não consegui localizar linhas de acordes.');
     const desired=normalizeKey(targetKey); if(desired)data=transposeBlocks(data,originalKey||data.key,desired); else data.key=originalKey;
     return Response.json(data);
   }catch(error){return Response.json({error:error?.message||'Erro ao processar a cifra.'},{status:500});}
