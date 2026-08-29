@@ -3,14 +3,15 @@ import { useState } from 'react';
 
 function BlockLines({ block }) {
   if (Array.isArray(block.lines) && block.lines.length) {
+    const lyric = [...block.lines].reverse().find((line) => line.lyric)?.lyric || '';
     return (
       <div className="music-lines">
         {block.lines.map((line, index) => (
           <div className="music-line" key={index}>
             <div className="line-chords">{line.chords || ''}</div>
-            {line.lyric && <div className="line-lyric">{line.lyric}</div>}
           </div>
         ))}
+        {lyric && <div className="line-lyric block-anchor">{lyric}</div>}
       </div>
     );
   }
@@ -19,8 +20,8 @@ function BlockLines({ block }) {
     <div className="music-lines">
       <div className="music-line">
         <div className="line-chords">{Array.isArray(block.chords) ? block.chords.join('  ') : block.chords || ''}</div>
-        {block.anchor && <div className="line-lyric">{block.anchor}...</div>}
       </div>
+      {block.anchor && <div className="line-lyric block-anchor">{block.anchor}...</div>}
     </div>
   );
 }
