@@ -3,7 +3,9 @@ import { useState } from 'react';
 
 function BlockLines({ block }) {
   if (Array.isArray(block.lines) && block.lines.length) {
-    const lyric = [...block.lines].reverse().find((line) => line.lyric)?.lyric || '';
+    // Na tela de seleção, mostrar somente o início do verso:
+    // a primeira linha que contém letra, e não a última.
+    const lyric = block.lines.find((line) => line.lyric)?.lyric || '';
     return (
       <div className="music-lines">
         {block.lines.map((line, index) => (
@@ -11,7 +13,7 @@ function BlockLines({ block }) {
             <div className="line-chords">{line.chords || ''}</div>
           </div>
         ))}
-        {lyric && <div className="line-lyric block-anchor">{lyric}</div>}
+        {lyric && <div className="line-lyric block-anchor">{lyric}...</div>}
       </div>
     );
   }
